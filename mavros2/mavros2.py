@@ -128,18 +128,28 @@ class Mavros2Write(Node):
                                                       10
                                                       )
 
-        self.generic_input # prevent unused variable warning
-        self.waypoint_in = self.create_subscription(
-                                                    GeoPath,
+        self.mode_in = self.create_subscription(
+                                                    String,
                                                     'mavros2_waypoint_in',
+                                                    self.incomming_mode,
+                                                    10
+                                                    )
+
+        self.geopath_in = self.create_subscription(
+                                                    GeoPath,
+                                                    'mavros2_geopath_in',
                                                     self.incomming_geopath,
                                                     10
                                                     )
+
+    def incomming_mode(self, msg):
+        if self.mav.proc.poll() is None:
+            return
+        self.mav.stdin.write('mode', msg.data)
         
     def incomming_msg(self, msg):
         if self.mav.proc.poll() is None:
             return
-        print('I write: "%s"' % msg.data)
         self.mav.stdin.write(msg.data+'\n')
     
     def incomming_geopath(self, msg):
