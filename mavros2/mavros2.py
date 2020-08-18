@@ -7,20 +7,17 @@ from std_msgs.msg import String
 from geographic_msgs.msg import GeoPath
 # mavproxy
 import subprocess
-from io import TextIOWrapper
-from time import sleep
+from multiprocessing import Lock
 
 
-# hold mavproxy
+# run mavproxy.py in encapsulated shell
 class Mav:
     def __init__(self):
-        self.proc = None
-        self.relaunch()
+        self.launch()
+        #protect stdin from simultanious writes
+        self.mutex = Lock()
 
-    def relaunch(self):
-        if self.proc is not None:
-            self.proc.kill()
-            self.proc.wait()
+    def launch(self):
         self.proc = subprocess.Popen(
                                     # 'ping 8.8.8.8',
                                     # 'python3 repeater.py',
@@ -34,62 +31,11 @@ class Mav:
         self.stdin = self.proc.stdin
         self.stdout = self.proc.stdout
 
-    #     self.flag = [False, False]
-    #     self.turn = None
-    #     self.messages = []
+    def relaunch(self):
+        self.proc.kill()
+        self.proc.wait()
+        self.launch()
 
-    # def communicate(self, message=None):
-    #     # reading
-    #     if message is None:
-    #         id = 0
-    #     # writing
-    #     else:
-    #         id = 1
-    #     #petersons algorithm
-    #     self.flag[id] = True
-    #     self.turn = 1-id
-    #     while (self.flag[1-id] and self.turn == 1-id):
-    #         pass
-    #     # critical section
-    #     if message is None:
-    #         # reading
-    #         if len(self.messages) > 0:
-    #             out = self.messages.pop()
-    #         else:
-    #             try:
-    #                 print('try')
-    #                 out, _ = self.proc.communicate(timeout=1)
-    #             except subprocess.TimeoutExpired:
-    #                 print('except')
-    #                 out = None
-    #             else:
-    #                 print(out)
-
-    #     else:
-    #         #writing
-    #         try:
-    #             out, _ = self.proc.communicate(input=message, timeout=0.01)
-    #         except subprocess.TimeoutExpired:
-    #             raise Exception('message not send')
-    #         else:
-    #             print(type(out))
-
-        # end of critical section
-        # self.flag[id] = False
-        # return out
-            
-
-        # self.stdin = TextIOWrapper(
-        #     self.proc.stdin,
-        #     encoding='utf-8',
-        #     write_through=True,
-        #     line_buffering=True
-        # )
-        # self.stdout = TextIOWrapper(
-        #     self.proc.stdout,
-        #     encoding='utf-8',
-        #     write_through=True
-        # )
 
 class Mavros2Read(Node):
     def __init__(self, mav, name=None):
@@ -97,14 +43,12 @@ class Mavros2Read(Node):
         self.node = rclpy.create_node(name or type(self).__name__)
         self.mav = mav
         self.publisher = self.node.create_publisher(String, 'mavros2_output', 10)
-        self.publisher # prevent unused variable warning
         
         self.timer = self.create_timer(0.01, self.read_callback)
 
     def read_callback(self):
         output = self.mav.stdout.readline()
-        print(len(output))
-        print(self.mav.proc.poll())
+        # check if mav is still running, if not empty output and restart
         if self.mav.proc.poll() is None or len(output) > 0: 
             print(output)
             msg = String()
@@ -112,7 +56,7 @@ class Mavros2Read(Node):
             self.publisher.publish(msg)
         else:
             self.mav.relaunch()
-                
+
 
 class Mavros2Write(Node):
     def __init__(self, mav, name=None):
@@ -142,19 +86,23 @@ class Mavros2Write(Node):
                                                     10
                                                     )
 
+    def write_string(self, message):
+        #no simultanious writes
+        self.mav.mutex.acquire()
+        try:
+            self.mav.stdin.write(message)
+        finally:
+            self.mav.mutex.release()
+
+
     def incomming_mode(self, msg):
-        if self.mav.proc.poll() is None:
-            return
-        self.mav.stdin.write('mode', msg.data)
-        
+        self.write_string('mode '+ msg.data)
+                
     def incomming_msg(self, msg):
-        if self.mav.proc.poll() is None:
-            return
-        self.mav.stdin.write(msg.data+'\n')
+        self.write_string(msg.data)
     
     def incomming_geopath(self, msg):
-        if self.mav.proc.poll() is None:
-            return
+        # create path as txt and load
         plan = open('path.txt', 'w')
         for i, line in msg.poses:
             if i == 0:
@@ -164,7 +112,7 @@ class Mavros2Write(Node):
                 plan.write('QGC WPL 1\n{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(
                                             i, 0, 0, 0, 0, 0, 0, 0, line.pose.position.latitude, line.pose.position.longitude, line.pose.position.latitude, line.pose.position.altitude, 1))
         plan.close()
-        self.mav.stdin.write('wp load path.txt')
+        self.write_string('wp load path.txt')
     
 
 
