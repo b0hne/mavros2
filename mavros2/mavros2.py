@@ -4,12 +4,16 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 #messages
-from std_msgs.msg import String
+from std_msgs.msg import String, Int8
 from geographic_msgs.msg import GeoPath
 # mavproxy
 from subprocess import Popen, PIPE, STDOUT
 from io import TextIOWrapper
 from memory_tempfile import MemoryTempfile
+
+#modules loaded by default
+# cmdlong, battery
+sensors = False
 
 # run mavproxy.py in encapsulated shell
 class Mav:
@@ -47,16 +51,24 @@ class Mav:
         self.tempfile = tempfile_.name
         tempfile_.close()
 
+#send message zu mavproxy
+def write_string(mav, msg):
+    mav.stdin.write(msg+'\n')
 
 
 class Mavros2Read(Node):
+    global sensors
     def __init__(self, mav, name=None):
         super().__init__('mavros2_read')
         self.node = rclpy.create_node(name or type(self).__name__)
         self.mav = mav
         self.publisher = self.node.create_publisher(String, 'mavros2_output', 10)
-        
-        self.timer = self.create_timer(0.01, self.read_callback)
+        #load modules
+        # write_string(self.mav, 'module load battery')
+        write_string(self.mav, 'module load sensors')
+
+        self.timer0 = self.create_timer(0.01, self.read_callback)
+        self.timer1 = self.create_timer(10, self.battery_callback)
 
     def read_callback(self):
         #blocks till message arrives
@@ -71,6 +83,9 @@ class Mavros2Read(Node):
             print('relaunch')
             self.mav.relaunch()
 
+    def battery_callback(self):
+        write_string(self.mav, 'bat')
+
 
 class Mavros2Write(Node):
     def __init__(self, mav, name=None):
@@ -78,6 +93,7 @@ class Mavros2Write(Node):
         self.node = rclpy.create_node(name or type(self).__name__)
         self.group = MutuallyExclusiveCallbackGroup()
         self.mav = mav
+        
         self.generic_input = self.create_subscription(
                                                       String,
                                                       'mavros2_generic_input',
@@ -88,32 +104,67 @@ class Mavros2Write(Node):
 
         self.mode_in = self.create_subscription(
                                                 String,
-                                                'mavros2_mode_in',
-                                                self.incomming_mode,
+                                                'mavros2_set_mode',
+                                                self.set_mode,
                                                 10,
                                                     callback_group=self.group
                                                 )
 
         self.geopath_in = self.create_subscription(
                                                    GeoPath,
-                                                   'mavros2_geopath_in',
-                                                   self.incomming_geopath,
+                                                   'mavros2_set_geopath',
+                                                   self.set_geopath,
                                                    10,
                                                    callback_group=self.group
                                                    )
 
-    def write_string(self, msg):
-            self.mav.stdin.write(msg+'\n')
+        self.speed_in = self.create_subscription(
+                                                   Int8,
+                                                   'mavros2_set_speed',
+                                                   self.set_speed,
+                                                   10,
+                                                   callback_group=self.group
+                                                   )
+
+        self.set_takeoff_altitude = self.create_subscription(
+                                                   Int8,
+                                                   'mavros2_set_takeoff_altitude',
+                                                   self.set_takeoff_alti,
+                                                   10,
+                                                   callback_group=self.group
+                                                   )
+        self.set_engine = self.create_subscription(
+                                                   String,
+                                                   'mavros2_set_engine_mode',
+                                                   self.set_engine_mode,
+                                                   10,
+                                                   callback_group=self.group
+                                                   )
 
 
-    def incomming_mode(self, msg):
+    # def write_string(self, msg):
+    #     self.mav.stdin.write(msg+'\n')
+
+    def set_engine_mode(self, msg):
+        eng = 'engine {}'.format(msg.data)       
+        write_string(self.mav, eng) 
+
+    def set_takeoff_alti(self, msg):
+        alt = 'takeoff {}'.format(msg)
+        write_string(self, alt)
+
+    def set_speed(self, msg):
+        speed = 'setspeed {}'.format(msg)
+        write_string(self.mav, speed)
+
+    def set_mode(self, msg):
         mode = 'mode {}'.format(msg.data)
-        self.write_string(mode)
+        write_string(self.mav, mode)
                 
     def incomming_msg(self, msg):
-        self.write_string(msg.data)
+        write_string(self.mav, msg.data)
     
-    def incomming_geopath(self, msg):
+    def set_geopath(self, msg):
         # create path as txt and load
         self.mav.tempfile
         plan = open(self.mav.tempfile, 'w')
@@ -125,7 +176,7 @@ class Mavros2Write(Node):
                 plan.write('QGC WPL 1\n{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(
                                             i, 0, 0, 0, 0, 0, 0, 0, line.pose.position.latitude, line.pose.position.longitude, line.pose.position.latitude, line.pose.position.altitude, 1))
         plan.close()
-        self.write_string('wp load {}').format(self.mav.tempfile)
+        write_string(self.mav, 'wp load {}').format(self.mav.tempfile)
     
 
 
