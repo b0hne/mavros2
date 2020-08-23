@@ -3,8 +3,8 @@
 from subprocess import Popen, PIPE, STDOUT
 from io import TextIOWrapper
 from multiprocessing import Process, Queue
+import re
 from memory_tempfile import MemoryTempfile
-
 #ros2
 import rclpy
 from rclpy.node import Node
@@ -18,21 +18,22 @@ class Mav:
     ''' run mavproxy.py in encapsulated shell'''
     def __init__(self):
         self.launch()
+        self.tempfile = None
         self.setup_tempfile()
         self.booted = False
+        self.status = Queue()
         #store commands to be send to mavproxy
         self.q = Queue()
-        self.tempfile = None
 
     def launch(self):
         '''start mavproxy in Popen'''
         self.proc = Popen(
-                        'mavproxy.py',
-                        shell=True,
-                        stdin=PIPE,
-                        stdout=PIPE,
-                        stderr=STDOUT
-                        )
+            'mavproxy.py',
+            shell=True,
+            stdin=PIPE,
+            stdout=PIPE,
+            stderr=STDOUT
+            )
         self.stdin = TextIOWrapper(
             self.proc.stdin,
             encoding='utf-8',
@@ -60,7 +61,6 @@ def write_string(mav):
     '''send message from queue tu mavproxy(threadsave)'''
     while True:
         mav.stdin.write(mav.q.get() + '\n')
-        print('send')
 
 
 class Mavros2Read(Node):
@@ -69,6 +69,8 @@ class Mavros2Read(Node):
         super().__init__('mavros2_read')
         self.node = rclpy.create_node(name or type(self).__name__)
         self.mav = mav
+        self.collecting_status = False
+        self.prefix = re.compile(r'\d+: ')
         self.publisher = self.node.create_publisher(String, 'mavros2_output', 10)
 
         self.timer0 = self.create_timer(0.01, self.read_callback)
@@ -76,14 +78,40 @@ class Mavros2Read(Node):
     def read_callback(self):
         '''blocks till message arrives'''
         output = self.mav.stdout.readline()
-        print(output)
+        # print(output)
         # check if mav is still running, if not empty output and restart
         if self.mav.proc.poll() is not None and len(output) == 0:
             print('relaunch')
             self.mav.relaunch()
         else:
-            print(output[4:16])
+            # check for status output
+            if output[:14] == 'RTL> Counters:':
+                self.collecting_status = True
+            # collect status outout in self.status
+            if self.collecting_status:
+                if place:=self.prefix.match(output):
+                    self.mav.status.put(output[place.span()[1]:])
+                    # check for last entry
+                    if output[place.span()[1]:][0:4] == 'WIND':
+                        self.collecting_status = False
+                else:
+                    self.mav.status.put(output)
+            # print(output)
 
+class Mavros2PublishStatus(Node):
+    '''processing mavproxy output, publishing relevant imformation'''
+    def __init__(self, mav, name=None):
+        super().__init__('mavros2_read')
+        self.node = rclpy.create_node(name or type(self).__name__)
+        self.mav = mav
+        self.publisher = self.node.create_publisher(String, 'mavros2_output', 10)
+
+        self.timer = self.create_timer(0.001, self.publish_callback)
+
+    def publish_callback(self):
+        '''blocks till message arrives'''
+        message = self.mav.status.get()
+        print(message)
 
 class Mavros2RequestStatus(Node):
     '''requests statusoutput every x seconds'''
@@ -123,6 +151,20 @@ class Mavros2Write(Node):
             GeoPath,
             'mavros2_set_geopath',
             self.set_geopath,
+            10
+            )
+
+        self.param_in = self.create_subscription(
+            String,
+            'mavros2_set_param',
+            self.set_param,
+            10
+            )
+
+        self.param_out = self.create_subscription(
+            String,
+            'mavros2_get_param',
+            self.get_param,
             10
             )
 
@@ -166,6 +208,18 @@ class Mavros2Write(Node):
         mode = 'mode {}'.format(msg.data)
         self.mav.q.put(mode)
 
+    def set_param(self, msg):
+        '''prepares and adds incoming message to input queue'''
+        #param set PARAMETERNAME VALUE
+        mode = 'param set {}'.format(msg.data)
+        self.mav.q.put(mode)
+
+    def get_param(self, msg):
+        '''prepares and adds incoming message to input queue'''
+        #param fetch PARAMETERNAME
+        mode = 'param fetch {}'.format(msg.data)
+        self.mav.q.put(mode)
+
     def incomming_msg(self, msg):
         '''adds incoming message to input queue'''
         self.mav.q.put(msg.data)
@@ -207,10 +261,12 @@ def main(args=None):
     mavros2_read = Mavros2Read(mav)
     mavros2_write = Mavros2Write(mav)
     mavros2_request_status = Mavros2RequestStatus(mav)
+    mavros2_publish_status = Mavros2PublishStatus(mav)
     executor = MultiThreadedExecutor()
     executor.add_node(mavros2_read)
     executor.add_node(mavros2_write)
     executor.add_node(mavros2_request_status)
+    executor.add_node(mavros2_publish_status)
     executor.spin()
     executor.shutdown()
     mavros2_read.destroy_node()
