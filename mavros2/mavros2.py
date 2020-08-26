@@ -20,9 +20,10 @@ class Mav:
         self.launch()
         self.tempfile = None
         self.setup_tempfile()
-        self.booted = False
+        # collect and store status output
+        self.collecting_status = False
         self.status = Queue()
-        #store commands to be send to mavproxy
+        # store commands to be send to mavproxy
         self.q = Queue()
 
     def launch(self):
@@ -48,7 +49,12 @@ class Mav:
         '''in case mavproxy terminates'''
         self.proc.kill()
         self.proc.wait()
+        self.collecting_status = False
+        self.status = Queue()
+        self.q = Queue()
+
         self.launch()
+        print('restarting')
 
     def setup_tempfile(self):
         '''store readable waypoints in non disc file'''
@@ -69,34 +75,41 @@ class Mavros2Read(Node):
         super().__init__('mavros2_read')
         self.node = rclpy.create_node(name or type(self).__name__)
         self.mav = mav
-        self.collecting_status = False
-        self.prefix = re.compile(r'\d+: ')
+        self.prefix_status0 = re.compile(r'\S+> Counters')
+        self.prefix_status1 = re.compile(r'\d+: ')
+
         self.publisher = self.node.create_publisher(String, 'mavros2_output', 10)
 
         self.timer0 = self.create_timer(0.01, self.read_callback)
 
     def read_callback(self):
-        '''blocks till message arrives'''
+        '''checks for new message'''
         output = self.mav.stdout.readline()
-        # print(output)
-        # check if mav is still running, if not empty output and restart
-        if self.mav.proc.poll() is not None and len(output) == 0:
-            print('relaunch')
-            self.mav.relaunch()
-        else:
+        # check if message exists
+        if len(output) > 0:
+            # remove '\n'
+            output = output[:-1]
             # check for status output
-            if output[:14] == 'RTL> Counters:':
-                self.collecting_status = True
+            if not self.mav.collecting_status and self.prefix_status0.match(output):
+                self.mav.collecting_status = True
             # collect status outout in self.status
-            if self.collecting_status:
-                if place:=self.prefix.match(output):
+            if self.mav.collecting_status:
+                if place:=self.prefix_status1.match(output):
                     self.mav.status.put(output[place.span()[1]:])
                     # check for last entry
                     if output[place.span()[1]:][0:4] == 'WIND':
-                        self.collecting_status = False
+                        self.mav.collecting_status = False
                 else:
                     self.mav.status.put(output)
-            # print(output)
+            else:
+                message = String()
+                message.data = output
+                self.publisher.publish(message)
+        # check if mav is still running, if not, empty output and restart
+        if self.mav.proc.poll() is not None and len(output) == 0:
+            print('relaunch')
+            self.mav.relaunch()
+
 
 class Mavros2PublishStatus(Node):
     '''processing mavproxy output, publishing relevant imformation'''
@@ -104,14 +117,17 @@ class Mavros2PublishStatus(Node):
         super().__init__('mavros2_read')
         self.node = rclpy.create_node(name or type(self).__name__)
         self.mav = mav
-        self.publisher = self.node.create_publisher(String, 'mavros2_output', 10)
+        self.publisher = self.node.create_publisher(String, 'mavros2_status', 10)
 
         self.timer = self.create_timer(0.001, self.publish_callback)
 
     def publish_callback(self):
         '''blocks till message arrives'''
         message = self.mav.status.get()
-        print(message)
+        msg = String()
+        msg.data = message
+        self.publisher.publish(msg)
+
 
 class Mavros2RequestStatus(Node):
     '''requests statusoutput every x seconds'''
