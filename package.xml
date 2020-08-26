@@ -10,6 +10,7 @@
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
   <depend>subprocess</depend>
+  <depend>multiprocessing</depend>
   <depend>io</depend>
 
   <test_depend>ament_copyright</test_depend>
